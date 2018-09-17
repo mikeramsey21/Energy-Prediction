@@ -1,0 +1,282 @@
+---
+title: "Final Report"
+author: "Michael Ramsey"
+date: "May 3, 2018"
+output:
+  pdf_document: default
+  html_document: default
+geometry: margin=.5in
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=6, fig.height=3, fig.align = 'center')
+```
+
+```{r echo = F, message = F, warning = F}
+
+# Set working directory
+setwd("C:/Users/mikee/Dropbox/Stat_Modeling/APPM-5590-Final/")
+
+# Get necessary libraries
+library(tidyverse)
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(broom)
+library(lme4)
+library(gvlma)
+library(glmmTMB)
+library(gridExtra)
+
+# Load the data
+# Denver is row 13
+temp = read.table('Data/FinalTempdata1.csv', sep=",", header=TRUE)
+energy = read.table('Data/EnergyData6.csv', sep=",", header=TRUE)
+temp3 = read.table('Data/FinalTempYr3.csv', sep=",", header=TRUE)
+
+# Load the prediction file
+predic <- read.table('Prediction/Michael_Ramsey_Final_Prediction.csv', sep=",", header = T)
+
+# Pool all of the data
+temp1 <- melt(temp,id.vars = c("City","Region","Pop"))
+energy1 <- melt(energy)
+data_long <- cbind(temp1, energy1$value)
+colnames(data_long) <- c('City','Region','Pop','Month','Temp','Energy')
+```
+
+# Exploratory Analysis
+
+\noindent It is important for a data scientist to first explore the data when given a new problem. This will give the modeler intuition for applying the correct methods. I begin by plotting the two years of temperature and energy data that we have. I initially notice that the temperature for the second year of data is much lower than the first year. I highlight the specific values for Denver.
+
+```{r echo = F, message = F, warning = F}
+# Plot Energy for Denver
+subdata_long <- data_long[data_long$City =='Denver',]
+ggplot(data=subdata_long[1:12,], aes(x=Temp, y=Energy)) + 
+  geom_point(data=data_long, aes(x=Temp, y=Energy)) +
+  geom_point(color = 'yellow') + 
+  geom_point(data=subdata_long[13:24,], aes(x=Temp,y=Energy),color = 'green') +
+  geom_smooth(data=subdata_long, aes(x=Temp,y=Energy), method = 'lm') +
+  ggtitle('Temperature vs. Energy Consumption for Denver') +
+  xlab('Temperature') +
+  ylab('Energy Usage (Gwh)')
+
+```
+
+\noindent
+The yellow dots correspond to the data for the first year of Denver and the green dots correspond to the second year. We can see from the plot above that a normal linear model will likely be insufficient for predicting the temperature for a third year. At this point, I considered pooling some of the other city data with Denver. Consider the following box-plot of the energy usage by month for all of the cities. The listed temperature for Denver for all 24 months is listed by a red dot.
+
+```{r echo = F, message = F, warning = F, fig.width = 7}
+# Boxplot the energy usage by month
+ggplot(data=data_long, aes(x=factor(Month), y=Energy)) + 
+  geom_boxplot() + 
+  geom_point(data = subdata_long, aes(x=factor(Month),y=Energy),col = 'red')+
+  ggtitle('Temperature vs. Energy Consumption') +
+  xlab('Month') +
+  ylab('Energy Usage')
+```
+
+\noindent
+We see that the energy usage for Denver is well above the median city energy consumption for each month. Due to this, a pooled linear model will be unable to describe the energy consumption for Denver. Additionally, I searched through the data to find other cities with "similar" data points to Denver. If there are cities that have similar temperature and energy usage values to Denver, I could consider pooling that data. The "closest" cities to Denver are Washington DC and Richmond. However, even the data from these two cities did not closely resemble the data for Denver. Therefore I decided to not pool any of the data. Next I plot the temperature values by month for Denver.
+
+```{r echo = F, message = F, warning = F}
+# Plot Denver temperature by month
+DenTemp <- subdata_long[,c(4,5)]
+DenTemp <- rbind(DenTemp,temp3)
+DenTemp$Month <- c(1,2,3,4,5,6,7,8,9,10,11,12,1,2,3,4,5,6,7,8,9,10,11,12,
+                   1,2,3,4,5,6,7,8,9,10,11,12)
+year1 <- rep('Year 1',12)
+year2 <- rep('Year 2',12)
+unknown <- rep('Year 3',12)
+temp5 <- c(year1,year2,unknown)
+DenTemp <- cbind(DenTemp,temp5)
+colnames(DenTemp) <- c('Month','Temp','Year')
+ggplot(data=DenTemp, aes(x=Month, y=Temp, color = factor(Year))) + 
+  geom_point() + 
+  ggtitle('Temperature for Denver') +
+  xlab('Month') +
+  ylab('Temperature') +
+  scale_color_discrete(name="Year")
+```
+
+\noindent
+At this point I was concerned about the big difference in temperatures for the two years of data for Denver. Since the temperature values for year 3 were much more similar to the values in year 1, I was worried that the data for year 2 would distort the predictions. However, I decided to keep them in the model. Next, I plot a histogram of the Energy Usage in Gwh.
+
+```{r echo = F, message = F, warning = F}
+# Histograms of the data
+ggplot(data=data_long, aes(x=Energy,color = City)) + 
+  geom_histogram(bins = 40) + 
+  ggtitle('Energy Consumption (Gwh)') +
+  xlab('Energy Usage (Gwh)') +
+  ylab('Frequency') +
+  coord_cartesian(xlim = c(0, 40)) +
+  theme(legend.position="none")
+```
+
+\noindent
+Clearly the data is not normally distributed. I also plotted a histogram for the offset log-energy. This did make the data look more normally distributed, however not enough to be acceptable. Because our data is not normally distributed, any sort of linear model willl likely be ineffective at predicting the Denver temperature. I will have to consider a model that does not rely on normally distributed data. Specifically, I will consider poisson models.
+
+# Model Results
+
+\noindent 
+For the purpose of learning, I created both normal models and poisson models to investigate their fit. Note that for all of the normal models, the assumption of normality was violated. Additionally for the pooled and stratified models, the assumption of heteroscedacity is violated. Because of this the interpretability is wrong and therefore I would discard all of these models. In the following table, we have a summary of the RSS for the whole dataset and also just for Denver.
+
+```{r echo = F, message = F, warning = F,fig.height = 4}
+# Create the models
+poolm <- lm(Energy~Temp, data = data_long)
+poolm3 <- lm(log(1+Energy)~Temp, data = data_long)
+stratlm <- lm(1+Energy~Temp*as.factor(City), data = data_long)
+stratlm2 <- lm(log(1+Energy)~Temp*as.factor(City), data = data_long)
+melm <- lmer(Energy ~ Temp +(1 + Temp | City), data = data_long)
+melm2 <- lmer(log(1+Energy) ~ Temp +(1 + Temp | City), data = data_long)
+plm2 <- glm(Energy ~ Temp*as.factor(City), family="poisson", data=data_long)
+meplm <- glmer(Energy ~ Temp + (1 + Temp | City), family="poisson", data=data_long)
+zglm <- glmmTMB(Energy ~ Temp + (1 + Temp | City), family="poisson", data=data_long, zi=~Temp)
+```
+
+```{r echo = F, message = F, warning = F}
+# Compare SSR
+x1<-sum((data_long$Energy - predict(poolm,data_long))^2)
+x2<-sum((data_long$Energy - exp(predict(poolm3,data_long)))^2)
+x3<-sum((data_long$Energy - predict(stratlm,data_long))^2)
+x4<-sum((data_long$Energy - exp(predict(stratlm2,data_long)))^2)
+x5<-sum((data_long$Energy - predict(melm,data_long))^2)
+x6<-sum((data_long$Energy - exp(predict(melm2,data_long)))^2)
+x7<-sum((data_long$Energy - exp(predict(plm2,data_long)))^2) #Best
+x8<-sum((data_long$Energy - exp(predict(meplm,data_long)))^2)
+x9<-sum((data_long$Energy - predict(zglm,data_long))^2)
+
+# Predictions for Denver
+y1<-sum((subdata_long$Energy - predict(poolm,subdata_long))^2)
+y2<-sum((subdata_long$Energy - exp(predict(poolm3,subdata_long)))^2)
+y3<-sum((subdata_long$Energy - predict(stratlm,subdata_long))^2)
+y4<-sum((subdata_long$Energy - exp(predict(stratlm2,subdata_long)))^2)
+y5<-sum((subdata_long$Energy - predict(melm,subdata_long))^2)
+y6<-sum((subdata_long$Energy - exp(predict(melm2,subdata_long)))^2)
+y7<-sum((subdata_long$Energy - exp(predict(plm2,subdata_long)))^2) #Best
+y8<-sum((subdata_long$Energy - exp(predict(meplm,subdata_long)))^2)
+y9<-sum((subdata_long$Energy - predict(zglm,subdata_long))^2)
+
+# Create the table of results
+Model <- c('Pooled Linear Model','Pooled Log-Linear Model','Stratified Linear Model',
+           'Stratified Log-Linear Model','Linear Mixed-Effect Model',
+           'Log-Linear Mixed-Effect Model','Stratified Poisson Model',
+           'Mixed-Effect Poisson Model','Zero-Inflated ME Poisson Model')
+RSS_Overall <- c(x1,x2,x3,x4,x5,x6,x7,x8,x9)
+RSS_Denver <- c(y1,y2,y3,y4,y5,y6,y7,y8,y9)
+stat_table <- data.frame(Model,RSS_Overall,RSS_Denver)
+grid.table(stat_table,rows = NULL)
+```
+
+\noindent
+We see that the model that minimizes the overall RSS is the stratified poisson model, closely followed by the mixed-effect poisson. We have the same behavior for the Denver specific RSS. I was surprised that the mixed-effect poisson model did not perform better.
+
+\noindent
+I will note here that many of the assumptions for the normal models were violated. The log-linear mixed effect model did a good job at predicting the energy usage for Denver in the model. However, the qq-plot the residuals clearly indicate that the normality assumption is violated. I decided remove this model from my final consideration. Please see the plot below for justification of this decision.
+
+```{r echo = F, message = F, warning = F,fig.height = 4}
+# Normality violated
+qqnorm(resid(melm2))
+qqline(resid(melm2))
+```
+
+# Poisson Models 
+
+\noindent 
+There were three main poisson models that I considered using: fixed-effect poisson, mixed-effect poisson, and zero-inflated mixed effect poisson. Here we plot the predicted model values vs the actual model values. The data for Denver is highlighted in yellow and green.
+
+```{r echo = F, message = F, warning = F,fig.width=8, fig.height=3, fig.align = 'center'}
+# Plot the prediction vs fitted values for stratified poisson
+a1 <- predict(plm2,subdata_long)
+plot1 <- qplot(data_long$Energy,fitted.values(plm2)) +
+  geom_point(aes(x=subdata_long$Energy[1:12],y=exp(unname(a1[1:12]))),col = 'yellow') +
+  geom_point(aes(x=subdata_long$Energy[13:24],y=exp(unname(a1[13:24]))),col = 'green') +
+  xlab('Acutal Energy Values') +
+  ylab('Predicted Energy Values') +
+  geom_abline(slope=1, intercept=0, color = 'red') +
+  ggtitle('Stratified Poisson')
+# Looks really good! - Best model so far
+  
+# Plot the prediction vs fitted values
+a2 <- predict(meplm,subdata_long)
+plot2 <- qplot(data_long$Energy,fitted.values(meplm)) +
+  geom_point(aes(x=subdata_long$Energy[1:12],y=exp(unname(a2[1:12]))),col = 'yellow') +
+  geom_point(aes(x=subdata_long$Energy[13:24],y=exp(unname(a2[13:24]))),col = 'green') +
+  xlab('Acutal Energy Values') +
+  ylab('Predicted Energy Values') +
+  geom_abline(slope=1, intercept=0, color = 'red') + 
+  ggtitle('Mixed-effect Poisson')
+  # Looks really good! - Best model so far
+
+# Plot the prediction vs fitted values
+a3 <- predict(zglm,subdata_long)
+plot3 <- qplot(data_long$Energy,fitted.values(zglm)) +
+  geom_point(aes(x=subdata_long$Energy[1:12],y=exp(a3[1:12])),col = 'yellow') +
+  geom_point(aes(x=subdata_long$Energy[13:24],y=exp(a3[13:24])),col = 'green') +
+  xlab('Acutal Energy Values') +
+  ylab('Predicted Energy Values') +
+  geom_abline(slope=1, intercept=0, color = 'red') + 
+  ggtitle('Zero-inflated Poisson')
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+```
+
+\noindent
+All three models appear to predict the energy consumption for denver well. Therefore I will check the model assumptions for all three. One of the main assumptions of the poisson model is that the variance and the mean of the distribution are equal. Therefore in order for our model to be valid, this assumption must be met. I calculate the disperson for all three poisson models and include them in the following table.
+
+```{r echo = F, message = F, warning = F}
+# Dispersion for plm2
+pval1 <- .0402
+disp1 <- .933576
+
+# Dispersion for mixed effect poisson
+rdev1 <- sum(residuals(meplm)^2)
+mdf1 <- length(fixef(meplm))
+rdf1 <- nrow(data_long)-mdf1 ## residual df [NOT accounting for random effects]
+disp2 <- rdev1/rdf1
+pval2 <- pchisq(rdev1,rdf1,lower.tail=FALSE)
+
+# Dispersion for zero inflate poisson
+rdev2 <- sum(residuals(zglm)^2)
+mdf2 <- length(fixef(zglm))
+rdf2 <- nrow(data_long)-mdf2 ## residual df [NOT accounting for random effects]
+disp3 <- rdev2/rdf2
+pval3 <- pchisq(rdev2,rdf2,lower.tail=FALSE)
+
+# Create vectors
+Model <- c('Stratified Poisson Model',
+           'Mixed-Effect Poisson Model','Zero-Inflated ME Poisson Model')
+Dispersion <- c(disp1, disp2, disp3)
+P_value <- c(pval1, pval2, pval3)
+```
+
+```{r echo = F, message = F, warning = F, fig.height = 2}
+# Creat data frame
+Poison <- data.frame(Model, Dispersion, P_value)
+grid.table(Poison,rows = NULL)
+```
+
+\noindent 
+We see from the table above that the mixed effect poisson model has the best dispersion. The stratified poisson model is underdispersed while the zero-inflated poisson model is overdispersed. Therfore, we can conclued that the mixed effect poisson is the best fitting model. However, the p-value for the stratified poisson model is barely significant at the .05 level. I will also consider the stratified poisson model for my final model because although the model is underdispersed, the fit is still good.
+
+# Conclusion
+
+\noindent 
+For my final model, I chose the fixed-effect poisson because this was the model that minimized the sum of the squared residuals for Denver. I obtained the following predictions: 
+
+```{r echo = F, message = F, warning = F,fig.height = 4}
+# Display the prediction file
+grid.table(predic,rows = NULL)
+```
+
+\noindent 
+Note that to compute the prediction intervals for my model, I had to bootstap the training data. My initial concerns about the temperature differences for the two years of data were remedied. The stratified poisson model did a good job at predicting the data values for both yeas of data. 
+
+# Reflection
+
+\noindent 
+From the results of the competition, clearly my results were not optimal. Had I chosen my final model as the mixed-effect poisson model, I may have won the cookies. Perhaps the stratified poisson model overfit the data and caused a biased prediction. My error was in not considering the shared variance for within cities and between cities measurement. This is exactly the situation that the mixed-effect model tries to remedy. Rather than relying on the RSS to choose my model, I should have relied more on measures of model validity. I will certainly consider this in the future.
+
+\noindent
+I tried adding new predictors to the model. I created a categrorical variable for "Region" of the United States. This did not turn out to be effective. I believe that this is due to the fact that Region is too broad of a predictor. I found in the exploratory analysis that all 51 cities have very different energy usage patterns. Surely a predictor of Region (4 regions) will be insufficient for describing the trend of the data. Therefore I excluded the reegion predictor from my model. I also created a continuous variable that represents the population of the city. I included this predictor in all of my normal-models; the predictor was insignificant in all normal models. Additionally I tried including this predictor in my poisson models. It tried using population as an offset term for my regression. This too turned out to be ineffective. The reason for this is that a cities population changes dynamically. It is possible that our two years of data were taken from very distant years, allowing for a population change in the United States. Perhaps if the two years are close to each other, the offset of population should be considered in the poisson models.
